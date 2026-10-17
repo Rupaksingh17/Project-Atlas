@@ -1,0 +1,13 @@
+.env
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+backend/atlas_local.db
+backend/chroma_data/
+chroma_data/
+.pytest_cache/
+*.log
+.DS_Store
+Thumbs.db
