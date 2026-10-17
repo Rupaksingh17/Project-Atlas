@@ -1,0 +1,57 @@
+version: '3.8'
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: atlas_mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: AtlasRoot2026!
+      MYSQL_DATABASE: atlas_db
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./data/seed_sql:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pAtlasRoot2026!"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: atlas_api
+    environment:
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_USER=root
+      - DB_PASSWORD=AtlasRoot2026!
+      - DB_NAME=atlas_db
+      - READONLY_DB_USER=atlas_readonly
+      - READONLY_DB_PASSWORD=AtlasReadOnly2026!
+      - API_KEY=atlas-secret-key-2026
+      - LLM_PROVIDER=mock
+    ports:
+      - "8000:8000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  portal:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: atlas_portal
+    environment:
+      - PYTHON_API_URL=http://api:8000
+      - PYTHON_API_KEY=atlas-secret-key-2026
+      - DB_HOST=mysql
+      - DB_USER=atlas_app
+      - DB_PASSWORD=AtlasAppPass2026!
+      - DB_NAME=atlas_db
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
+      - mysql
