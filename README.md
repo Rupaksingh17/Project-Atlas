@@ -122,7 +122,7 @@ Use the separate `X-Ops-Key` for report ingestion and escalation review. The por
 Before production use, set `ATLAS_DEMO_MODE=false`, `DATASET_LABEL=production`, and `COOKIE_SECURE=true` when HTTPS is terminated in front of the portal. Leave `LOAD_ASSIGNMENT_FIXTURES=false`. Existing CI3 authentication must populate the session field named by `ATLAS_CLIENT_SESSION_FIELD`; this repository does not contain the organization's login/identity system. Never make the demo client switcher available to real clients.
 
 ### Access Endpoints
-- **CodeIgniter 3 Chat Portal**: [http://localhost:8080](http://localhost:8080) (loopback only; place behind TLS proxy for deployment)
+- **CodeIgniter 3 Chat Portal**: [http://localhost:8080/index.php/copilot](http://localhost:8080/index.php/copilot) (loopback only; place behind TLS proxy for deployment)
 - **FastAPI Interactive Docs**: [http://localhost:8000/docs](http://localhost:8000/docs) (loopback only)
 - **Health Check**: [http://localhost:8000/health](http://localhost:8000/health)
 
