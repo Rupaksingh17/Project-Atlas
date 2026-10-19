@@ -4,8 +4,8 @@ from pydantic import BaseModel, Field
 class Citation(BaseModel):
     report_id: str
     title: Optional[str] = None
-    page: int
-    quoted_text: str
+    page: int = Field(..., ge=1)
+    quoted_text: str = Field(..., max_length=500)
 
 class ConflictItem(BaseModel):
     metric: str
@@ -21,20 +21,21 @@ class DerivedValue(BaseModel):
     nature: str = "derived_estimate"
 
 class ExecutionMetrics(BaseModel):
-    latency_ms: int
-    tokens_used: int
-    estimated_cost_usd: float
+    latency_ms: int = Field(..., ge=0)
+    tokens_used: int = Field(..., ge=0)
+    estimated_cost_usd: Optional[float] = Field(None, ge=0)
 
 class ChatRequest(BaseModel):
-    client_id: str = Field(..., description="Unique client identifier, e.g. C-01")
-    query: str = Field(..., min_length=1, description="User question or instruction")
+    client_id: str = Field(..., min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$", description="Authenticated client account identifier")
+    query: str = Field(..., min_length=1, max_length=8000, description="User question")
 
 class ChatResponse(BaseModel):
+    chat_id: Optional[int] = None
     answer: str
-    citations: List[Citation] = []
-    confidence: float
-    conflicts: List[ConflictItem] = []
-    derived_values: List[DerivedValue] = []
+    citations: List[Citation] = Field(default_factory=list)
+    confidence: float = Field(..., ge=0, le=1)
+    conflicts: List[ConflictItem] = Field(default_factory=list)
+    derived_values: List[DerivedValue] = Field(default_factory=list)
     escalated: bool = False
     execution_metrics: Optional[ExecutionMetrics] = None
 
@@ -43,10 +44,11 @@ class EscalationTicket(BaseModel):
     client_id: str
     query: str
     reason: str
-    confidence: float
+    confidence: float = Field(..., ge=0, le=1)
     status: str = "open"
     created_at: Optional[str] = None
 
 class FeedbackRequest(BaseModel):
-    chat_id: int
+    chat_id: int = Field(..., ge=1)
+    client_id: str = Field(..., min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
     feedback: str = Field(..., pattern="^(up|down)$")

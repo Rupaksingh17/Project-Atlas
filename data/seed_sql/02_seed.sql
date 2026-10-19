@@ -31,12 +31,5 @@ INSERT INTO clients (id, company, contact_email, purchased_reports) VALUES
 ('C-02', 'Blue Delta Infra', 'procurement@example.com', 'R-103')
 ON DUPLICATE KEY UPDATE company=VALUES(company);
 
--- Dual User Security Configuration
-CREATE USER IF NOT EXISTS 'atlas_app'@'%' IDENTIFIED BY 'AtlasAppPass2026!';
-GRANT ALL PRIVILEGES ON atlas_db.* TO 'atlas_app'@'%';
-
-CREATE USER IF NOT EXISTS 'atlas_readonly'@'%' IDENTIFIED BY 'AtlasReadOnly2026!';
-GRANT SELECT ON atlas_db.reports TO 'atlas_readonly'@'%';
-GRANT SELECT ON atlas_db.market_metrics TO 'atlas_readonly'@'%';
--- Explicitly DO NOT grant access to clients, escalations, or chat_logs to atlas_readonly
-FLUSH PRIVILEGES;
+-- Database users and least-privilege grants are created by 03_create_users.sh,
+-- which reads deployment secrets from the MySQL container environment.

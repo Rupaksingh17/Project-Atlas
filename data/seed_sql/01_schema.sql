@@ -29,7 +29,7 @@ CREATE TABLE market_metrics (
 -- 3. Clients table
 DROP TABLE IF EXISTS clients;
 CREATE TABLE clients (
-    id VARCHAR(20) PRIMARY KEY,
+    id VARCHAR(64) PRIMARY KEY,
     company VARCHAR(255) NOT NULL,
     contact_email VARCHAR(255) NOT NULL,
     purchased_reports TEXT NOT NULL
@@ -39,7 +39,7 @@ CREATE TABLE clients (
 DROP TABLE IF EXISTS escalations;
 CREATE TABLE escalations (
     id INT AUTO_INCREMENT PRIMARY KEY,
-    client_id VARCHAR(20) NOT NULL,
+    client_id VARCHAR(64) NOT NULL,
     query TEXT NOT NULL,
     reason VARCHAR(255) NOT NULL,
     confidence DECIMAL(4,3) DEFAULT 0.000,
@@ -51,12 +51,14 @@ CREATE TABLE escalations (
 DROP TABLE IF EXISTS chat_logs;
 CREATE TABLE chat_logs (
     id INT AUTO_INCREMENT PRIMARY KEY,
-    client_id VARCHAR(20) NOT NULL,
+    client_id VARCHAR(64) NOT NULL,
     query TEXT NOT NULL,
     answer TEXT NOT NULL,
     confidence DECIMAL(4,3) DEFAULT 0.000,
     escalated TINYINT(1) DEFAULT 0,
     latency_ms INT DEFAULT 0,
+    tokens_used INT DEFAULT 0,
+    estimated_cost_usd DECIMAL(12,8) NULL,
     feedback ENUM('up', 'down', 'none') DEFAULT 'none',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
@@ -65,7 +67,7 @@ CREATE TABLE chat_logs (
 DROP TABLE IF EXISTS security_audit;
 CREATE TABLE security_audit (
     id INT AUTO_INCREMENT PRIMARY KEY,
-    client_id VARCHAR(20) NOT NULL,
+    client_id VARCHAR(64) NOT NULL,
     event_type VARCHAR(100) NOT NULL,
     payload TEXT NOT NULL,
     detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP

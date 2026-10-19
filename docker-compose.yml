@@ -1,57 +1,100 @@
-version: '3.8'
-
 services:
   mysql:
-    image: mysql:8.0
-    container_name: atlas_mysql
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: database/Dockerfile.mysql
     environment:
-      MYSQL_ROOT_PASSWORD: AtlasRoot2026!
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}
       MYSQL_DATABASE: atlas_db
-    ports:
-      - "3306:3306"
+      LOAD_ASSIGNMENT_FIXTURES: ${LOAD_ASSIGNMENT_FIXTURES:-false}
+      ATLAS_APP_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+      ATLAS_READONLY_PASSWORD: ${READONLY_DB_PASSWORD:?Set READONLY_DB_PASSWORD in .env}
     volumes:
-      - ./data/seed_sql:/docker-entrypoint-initdb.d
+      - mysql_data:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pAtlasRoot2026!"]
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -p$${MYSQL_ROOT_PASSWORD} --silent"]
       interval: 5s
       timeout: 5s
       retries: 10
 
   api:
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     build:
       context: .
       dockerfile: backend/Dockerfile
-    container_name: atlas_api
     environment:
       - DB_HOST=mysql
       - DB_PORT=3306
-      - DB_USER=root
-      - DB_PASSWORD=AtlasRoot2026!
+      - DB_USER=atlas_app
+      - DB_PASSWORD=${DB_PASSWORD:?Set DB_PASSWORD in .env}
       - DB_NAME=atlas_db
+      - DATASET_LABEL=${DATASET_LABEL:-production}
+      - REPORTS_DIR=/reports
       - READONLY_DB_USER=atlas_readonly
-      - READONLY_DB_PASSWORD=AtlasReadOnly2026!
-      - API_KEY=atlas-secret-key-2026
-      - LLM_PROVIDER=mock
+      - READONLY_DB_PASSWORD=${READONLY_DB_PASSWORD:?Set READONLY_DB_PASSWORD in .env}
+      - API_KEY=${API_KEY:?Set API_KEY in .env}
+      - OPS_API_KEY=${OPS_API_KEY:?Set OPS_API_KEY in .env}
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4o-mini}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - LLM_TIMEOUT_SECONDS=${LLM_TIMEOUT_SECONDS:-20}
+      - LLM_MAX_OUTPUT_TOKENS=${LLM_MAX_OUTPUT_TOKENS:-800}
+      - LLM_INPUT_USD_PER_1M_TOKENS=${LLM_INPUT_USD_PER_1M_TOKENS:--1}
+      - LLM_OUTPUT_USD_PER_1M_TOKENS=${LLM_OUTPUT_USD_PER_1M_TOKENS:--1}
+      - ALLOW_SQLITE_FALLBACK=false
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - chroma_data:/app/backend/chroma_data
+      - ${REPORTS_HOST_DIR:-./production_reports}:/reports:ro
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 180s
     depends_on:
       mysql:
         condition: service_healthy
 
   portal:
+    restart: unless-stopped
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    container_name: atlas_portal
     environment:
       - PYTHON_API_URL=http://api:8000
-      - PYTHON_API_KEY=atlas-secret-key-2026
-      - DB_HOST=mysql
-      - DB_USER=atlas_app
-      - DB_PASSWORD=AtlasAppPass2026!
-      - DB_NAME=atlas_db
+      - PYTHON_API_KEY=${API_KEY:?Set API_KEY in .env}
+      - DATASET_LABEL=${DATASET_LABEL:-production}
+      - ATLAS_DEMO_MODE=${ATLAS_DEMO_MODE:-false}
+      - CI_ENV=production
+      - ATLAS_CLIENT_SESSION_FIELD=${ATLAS_CLIENT_SESSION_FIELD:-authenticated_client_id}
+      - ATLAS_PUBLIC_BASE_URL=${ATLAS_PUBLIC_BASE_URL:-/}
+      - CI_ENCRYPTION_KEY=${CI_ENCRYPTION_KEY:?Set CI_ENCRYPTION_KEY in .env}
+      - COOKIE_SECURE=${COOKIE_SECURE:-true}
     ports:
-      - "8080:80"
+      - "127.0.0.1:8080:80"
+    healthcheck:
+      test: ["CMD", "php", "-r", "$$socket = @fsockopen('127.0.0.1', 80); if (!$$socket) { exit(1); } fclose($$socket);"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
     depends_on:
-      - api
-      - mysql
+      api:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+
+volumes:
+  mysql_data:
+  chroma_data:

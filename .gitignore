@@ -1,4 +1,6 @@
 .env
+.env.*
+!.env.example
 __pycache__/
 *.py[cod]
 *$py.class
@@ -11,6 +13,8 @@ chroma_data/
 frontend/application/logs/log-*.php
 frontend/application/cache/sessions/*
 !frontend/application/cache/sessions/.gitkeep
+/production_reports/*
+!/production_reports/README.md
 *.log
 .DS_Store
 Thumbs.db

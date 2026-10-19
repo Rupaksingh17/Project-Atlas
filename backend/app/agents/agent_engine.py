@@ -1,17 +1,21 @@
 import re
 import time
+import logging
 from typing import Dict, Any, List, Optional
 from backend.app.config import settings
 from backend.app.database.db import db_manager
 from backend.app.database.vector_store import vector_store
 from backend.app.guardrails.injection_detector import injection_detector
-from backend.app.guardrails.sql_guard import sql_guard
 from backend.app.tools.calculator import calculator
 from backend.app.models.api import ChatResponse, Citation, ConflictItem, DerivedValue, ExecutionMetrics
+from backend.app.services.llm import answer_service, LLMUnavailable
+
+logger = logging.getLogger(__name__)
 
 class AgentEngine:
     def process_query(self, client_id: str, query: str) -> ChatResponse:
         start_time = time.time()
+        assignment_fixtures = settings.DATASET_LABEL == "assignment_demo_fictional"
         
         # 1. Input Guardrail: Detect Prompt Injection
         is_injection, sanitized_query = injection_detector.scan_and_sanitize(client_id, query)
@@ -24,7 +28,7 @@ class AgentEngine:
                 conflicts=[],
                 derived_values=[],
                 escalated=False,
-                execution_metrics=ExecutionMetrics(latency_ms=elapsed_ms, tokens_used=45, estimated_cost_usd=0.0001)
+                execution_metrics=ExecutionMetrics(latency_ms=elapsed_ms, tokens_used=0, estimated_cost_usd=0.0)
             )
 
         # 2. Out of Scope Refusal
@@ -38,7 +42,7 @@ class AgentEngine:
                 conflicts=[],
                 derived_values=[],
                 escalated=False,
-                execution_metrics=ExecutionMetrics(latency_ms=elapsed_ms, tokens_used=30, estimated_cost_usd=0.00005)
+                execution_metrics=ExecutionMetrics(latency_ms=elapsed_ms, tokens_used=0, estimated_cost_usd=0.0)
             )
 
         # 3. SQL Safety / Malicious DB write check
@@ -51,34 +55,85 @@ class AgentEngine:
                 conflicts=[],
                 derived_values=[],
                 escalated=False,
-                execution_metrics=ExecutionMetrics(latency_ms=elapsed_ms, tokens_used=35, estimated_cost_usd=0.00006)
+                execution_metrics=ExecutionMetrics(latency_ms=elapsed_ms, tokens_used=0, estimated_cost_usd=0.0)
             )
 
-        # 4. Aggregate & Metadata SQL Queries
+        # Resolve scope before any inventory query; catalog answers must obey
+        # the same report entitlements as document retrieval.
+        purchased = db_manager.get_client_purchases(client_id)
+        allowed_reports = sorted(set(purchased + db_manager.get_public_report_ids()))
+        catalog_reports = db_manager.get_all_reports()
+        catalog_ids = {str(report.get("id")) for report in catalog_reports}
+        if not assignment_fixtures:
+            indexed_ids = set(vector_store.indexed_report_ids())
+            allowed_reports = [report_id for report_id in allowed_reports
+                               if report_id in catalog_ids and report_id in indexed_ids]
+        entitled_reports = [
+            report for report in catalog_reports
+            if str(report.get("id")) in allowed_reports
+        ]
+
+        if not catalog_reports or vector_store.count() == 0:
+            elapsed_ms = int((time.time() - start_time) * 1000)
+            return ChatResponse(
+                answer=(
+                    "No authorized reports have been indexed for this workspace yet. "
+                    "An administrator must add licensed report files, index them, and "
+                    "grant this client access before research questions can be answered."
+                ),
+                citations=[],
+                confidence=0.0,
+                conflicts=[],
+                derived_values=[],
+                escalated=False,
+                execution_metrics=ExecutionMetrics(
+                    latency_ms=elapsed_ms, tokens_used=0, estimated_cost_usd=0.0
+                ),
+            )
+
+        # 4. Per-client aggregate & metadata queries
         if any(term in lower_q for term in ["how many reports", "most reports", "which sector has the most", "total reports", "which reports in your library cover", "list reports in"]):
             try:
                 if "which sector has the most" in lower_q or "most reports" in lower_q:
-                    sql = "SELECT sector, COUNT(*) as report_count FROM reports GROUP BY sector ORDER BY report_count DESC LIMIT 1"
-                    safe_sql = sql_guard.validate_and_format(sql)
-                    rows = db_manager.execute_readonly_query(safe_sql)
+                    query_template = (
+                        "SELECT sector, COUNT(*) AS report_count FROM reports "
+                        "WHERE id IN ({placeholders}) GROUP BY sector "
+                        "ORDER BY report_count DESC LIMIT 1"
+                    )
+                    if allowed_reports:
+                        marker = "%s" if db_manager.use_mysql else "?"
+                        sql_query = query_template.format(
+                            placeholders=", ".join([marker] * len(allowed_reports))
+                        )
+                        rows = db_manager.execute_readonly_query(sql_query, tuple(allowed_reports))
+                    else:
+                        sql_query = "SELECT sector, COUNT(*) AS report_count FROM reports WHERE 1 = 0 LIMIT 1"
+                        rows = []
                     elapsed_ms = int((time.time() - start_time) * 1000)
-                    top_sector = rows[0].get("sector") if rows else "Unknown"
-                    count = rows[0].get("report_count") if rows else 0
-                    answer = f"The sector with the most reports in our library is '{top_sector}' with {count} reports. (Query executed: `{safe_sql}`)"
-                elif "utilities" in lower_q:
-                    sql = "SELECT id, title, sector FROM reports WHERE sector = 'Utilities'"
-                    safe_sql = sql_guard.validate_and_format(sql)
-                    rows = db_manager.execute_readonly_query(safe_sql)
+                    if rows:
+                        top_sector = str(rows[0].get("sector", "Unknown"))
+                        count = int(rows[0].get("report_count", 0))
+                    else:
+                        top_sector, count = "No reports", 0
+                    answer = (
+                        f"Among reports available to your account, '{top_sector}' has the most with {count} report(s). "
+                        f"Read-only SQL used: {sql_query}."
+                    )
+                elif "which reports in your library cover" in lower_q or "list reports in" in lower_q:
+                    matching_sector = next((
+                        str(report.get("sector")) for report in entitled_reports
+                        if str(report.get("sector", "")).lower() in lower_q
+                    ), None)
+                    rows = [report for report in entitled_reports if not matching_sector or str(report.get("sector", "")).lower() == matching_sector.lower()]
                     elapsed_ms = int((time.time() - start_time) * 1000)
                     titles = [f"{r.get('id')} ({r.get('title')})" for r in rows]
-                    answer = f"The following reports cover the Utilities sector: {', '.join(titles)}. (Query executed: `{safe_sql}`)"
+                    if matching_sector:
+                        answer = f"Reports in the {matching_sector} sector available to your account: {', '.join(titles) if titles else 'none'}"
+                    else:
+                        answer = f"Your account can access {len(entitled_reports)} report(s): {', '.join(titles) if titles else 'none'}"
                 else:
-                    sql = "SELECT COUNT(*) as total FROM reports"
-                    safe_sql = sql_guard.validate_and_format(sql)
-                    rows = db_manager.execute_readonly_query(safe_sql)
                     elapsed_ms = int((time.time() - start_time) * 1000)
-                    total_cnt = rows[0].get("total") if rows else 0
-                    answer = f"Our syndicated research repository currently hosts {total_cnt} published reports. (Query executed: `{safe_sql}`)"
+                    answer = f"Your account can access {len(entitled_reports)} report(s)."
                 
                 return ChatResponse(
                     answer=answer,
@@ -87,25 +142,22 @@ class AgentEngine:
                     conflicts=[],
                     derived_values=[],
                     escalated=False,
-                    execution_metrics=ExecutionMetrics(latency_ms=elapsed_ms, tokens_used=60, estimated_cost_usd=0.0001)
+                    execution_metrics=ExecutionMetrics(latency_ms=elapsed_ms, tokens_used=0, estimated_cost_usd=0.0)
                 )
             except Exception as e:
+                logger.exception("Per-client report summary failed")
                 elapsed_ms = int((time.time() - start_time) * 1000)
                 return ChatResponse(
-                    answer=f"Unable to process database aggregation: {str(e)}",
+                    answer="Unable to retrieve your account's report summary right now. Please try again shortly.",
                     citations=[],
                     confidence=0.0,
                     conflicts=[],
                     derived_values=[],
                     escalated=True,
-                    execution_metrics=ExecutionMetrics(latency_ms=elapsed_ms, tokens_used=20, estimated_cost_usd=0.0)
+                    execution_metrics=ExecutionMetrics(latency_ms=elapsed_ms, tokens_used=0, estimated_cost_usd=0.0)
                 )
 
         # 5. Client Entitlements Resolution
-        purchased = db_manager.get_client_purchases(client_id)
-        # Always allow public excerpt reports (like R-102)
-        allowed_reports = list(set(purchased + ["R-102"]))
-
         # 6. Specific Explicit Report Mentions Check
         rep_matches = re.findall(r"\b(R-\d+)\b", query, flags=re.IGNORECASE)
         for rep in rep_matches:
@@ -119,12 +171,12 @@ class AgentEngine:
                     conflicts=[],
                     derived_values=[],
                     escalated=False,
-                    execution_metrics=ExecutionMetrics(latency_ms=elapsed_ms, tokens_used=50, estimated_cost_usd=0.00008)
+                    execution_metrics=ExecutionMetrics(latency_ms=elapsed_ms, tokens_used=0, estimated_cost_usd=0.0)
                 )
 
         # 7. Forecast Horizon Check (e.g. 2035)
         target_year_match = re.search(r"\b(20[3-5]\d)\b", query)
-        if target_year_match:
+        if target_year_match and assignment_fixtures:
             year_val = int(target_year_match.group(1))
             if not calculator.check_forecast_horizon(year_val, max_forecast_year=2030):
                 ticket_id = db_manager.create_escalation(
@@ -141,11 +193,18 @@ class AgentEngine:
                     conflicts=[],
                     derived_values=[],
                     escalated=True,
-                    execution_metrics=ExecutionMetrics(latency_ms=elapsed_ms, tokens_used=75, estimated_cost_usd=0.00012)
+                    execution_metrics=ExecutionMetrics(latency_ms=elapsed_ms, tokens_used=0, estimated_cost_usd=0.0)
                 )
 
         # 8. Derived Projections (e.g. APAC 2030)
-        if ("2030" in lower_q and "apac" in lower_q) or ("worth in 2030" in lower_q and "apac" in lower_q):
+        if assignment_fixtures and ((("2030" in lower_q and "apac" in lower_q) or ("worth in 2030" in lower_q and "apac" in lower_q))):
+            if "R-101" not in allowed_reports:
+                elapsed_ms = int((time.time() - start_time) * 1000)
+                return ChatResponse(
+                    answer="I can't calculate that projection from a report outside your subscription. The available public excerpt does not provide the required 2030 forecast inputs. You can request access to the full report or ask an analyst to review the request.",
+                    citations=[], confidence=1.0, conflicts=[], derived_values=[], escalated=False,
+                    execution_metrics=ExecutionMetrics(latency_ms=elapsed_ms, tokens_used=0, estimated_cost_usd=0.0)
+                )
             calc_result = calculator.calculate_cagr_projection(
                 base_value=4.21,
                 cagr_percent=11.2,
@@ -179,11 +238,11 @@ class AgentEngine:
                 conflicts=[],
                 derived_values=[derived],
                 escalated=False,
-                execution_metrics=ExecutionMetrics(latency_ms=elapsed_ms, tokens_used=120, estimated_cost_usd=0.0002)
+                execution_metrics=ExecutionMetrics(latency_ms=elapsed_ms, tokens_used=0, estimated_cost_usd=0.0)
             )
 
         # 9. Recommendation / Trust Query ("Which report should I trust?")
-        if "which report should i trust" in lower_q or "which of your reports should we trust" in lower_q:
+        if assignment_fixtures and ("which report should i trust" in lower_q or "which of your reports should we trust" in lower_q):
             if "R-101" not in purchased:
                 elapsed_ms = int((time.time() - start_time) * 1000)
                 return ChatResponse(
@@ -200,7 +259,7 @@ class AgentEngine:
                     conflicts=[],
                     derived_values=[],
                     escalated=False,
-                    execution_metrics=ExecutionMetrics(latency_ms=elapsed_ms, tokens_used=80, estimated_cost_usd=0.00015)
+                    execution_metrics=ExecutionMetrics(latency_ms=elapsed_ms, tokens_used=0, estimated_cost_usd=0.0)
                 )
             else:
                 elapsed_ms = int((time.time() - start_time) * 1000)
@@ -230,7 +289,7 @@ class AgentEngine:
                     conflicts=[],
                     derived_values=[],
                     escalated=True,
-                    execution_metrics=ExecutionMetrics(latency_ms=elapsed_ms, tokens_used=140, estimated_cost_usd=0.00025)
+                    execution_metrics=ExecutionMetrics(latency_ms=elapsed_ms, tokens_used=0, estimated_cost_usd=0.0)
                 )
 
         # 10. Check if query is targeting an unpurchased topic (e.g. IoT, Sensors, Gas)
@@ -248,7 +307,7 @@ class AgentEngine:
                     conflicts=[],
                     derived_values=[],
                     escalated=False,
-                    execution_metrics=ExecutionMetrics(latency_ms=elapsed_ms, tokens_used=50, estimated_cost_usd=0.00008)
+                    execution_metrics=ExecutionMetrics(latency_ms=elapsed_ms, tokens_used=0, estimated_cost_usd=0.0)
                 )
 
         # 11. Entitlement-Aware RAG Retrieval
@@ -262,7 +321,7 @@ class AgentEngine:
         has_r101 = any(c["metadata"].get("report_id") == "R-101" for c in retrieved_chunks) or ("smart water meter" in lower_q and "R-101" in allowed_reports)
         has_r102 = any(c["metadata"].get("report_id") == "R-102" for c in retrieved_chunks) or ("smart water meter" in lower_q and "R-102" in allowed_reports)
         
-        if ("2024" in lower_q or "market size" in lower_q) and has_r101 and has_r102 and ("water meter" in lower_q or "smart water" in lower_q):
+        if assignment_fixtures and ("2024" in lower_q or "market size" in lower_q) and has_r101 and has_r102 and ("water meter" in lower_q or "smart water" in lower_q):
             conflicts = [
                 ConflictItem(
                     metric="Global Smart Water Meter Market Size (2024)",
@@ -298,7 +357,7 @@ class AgentEngine:
                 conflicts=conflicts,
                 derived_values=[],
                 escalated=False,
-                execution_metrics=ExecutionMetrics(latency_ms=elapsed_ms, tokens_used=135, estimated_cost_usd=0.00022)
+                execution_metrics=ExecutionMetrics(latency_ms=elapsed_ms, tokens_used=0, estimated_cost_usd=0.0)
             )
 
         if not retrieved_chunks:
@@ -316,30 +375,133 @@ class AgentEngine:
                 conflicts=[],
                 derived_values=[],
                 escalated=True,
-                execution_metrics=ExecutionMetrics(latency_ms=elapsed_ms, tokens_used=40, estimated_cost_usd=0.00006)
+                execution_metrics=ExecutionMetrics(latency_ms=elapsed_ms, tokens_used=0, estimated_cost_usd=0.0)
             )
 
-        # Compile citations and synthesize answer from highest scoring chunk
-        top_chunk = retrieved_chunks[0]
-        meta = top_chunk["metadata"]
-        citations = [
-            Citation(
-                report_id=meta.get("report_id", "Unknown"),
-                page=meta.get("page", 1),
-                quoted_text=top_chunk["text"][:250] + "..."
+        # Production projections are computed only from numeric inputs present
+        # in the already entitlement-filtered source chunks.
+        projection_intent = any(term in lower_q for term in ["worth", "calculate", "project", "projection", "forecast", "estimate"])
+        if not assignment_fixtures and projection_intent and re.search(r"\b20\d{2}\b", query):
+            calc_result = calculator.derive_from_sources(query, retrieved_chunks)
+            if calc_result.get("status") == "beyond_horizon":
+                horizon = calc_result["forecast_end"]
+                ticket_id = db_manager.create_escalation(
+                    client_id=client_id, query=query,
+                    reason=f"Requested projection exceeds source forecast horizon ending {horizon}",
+                    confidence=0.20,
+                )
+                elapsed_ms = int((time.time() - start_time) * 1000)
+                return ChatResponse(
+                    answer=f"The subscribed sources forecast only through {horizon}. I will not extrapolate beyond that published horizon. Analyst ticket #{ticket_id} has been opened.",
+                    citations=[], confidence=0.20, conflicts=[], derived_values=[], escalated=True,
+                    execution_metrics=ExecutionMetrics(latency_ms=elapsed_ms, tokens_used=0, estimated_cost_usd=0.0),
+                )
+            if calc_result.get("status") == "derived":
+                cited_chunks = []
+                for sentence in calc_result["source_sentences"]:
+                    match = next((chunk for chunk in retrieved_chunks if sentence in str(chunk.get("text", ""))), None)
+                    if match and match not in cited_chunks:
+                        cited_chunks.append(match)
+                citations = [Citation(
+                    report_id=str(chunk.get("metadata", {}).get("report_id", "Unknown")),
+                    title=chunk.get("metadata", {}).get("title"),
+                    page=int(chunk.get("metadata", {}).get("page", 1)),
+                    quoted_text=sentence[:500],
+                ) for sentence in calc_result["source_sentences"]
+                    for chunk in cited_chunks if sentence in str(chunk.get("text", ""))]
+                derived = DerivedValue(
+                    metric=calc_result["metric"], formula=calc_result["formula"],
+                    assumptions=calc_result["assumptions"], value=calc_result["value"],
+                )
+                elapsed_ms = int((time.time() - start_time) * 1000)
+                return ChatResponse(
+                    answer=f"Using only the subscribed reports, the derived estimate is {calc_result['value']}. The result and assumptions are shown below.",
+                    citations=citations, confidence=0.90 if citations else 0.0,
+                    conflicts=[], derived_values=[derived], escalated=not bool(citations),
+                    execution_metrics=ExecutionMetrics(latency_ms=elapsed_ms, tokens_used=0, estimated_cost_usd=0.0),
+                )
+
+        # General questions are answered by a configured model using only the
+        # chunks already filtered by the client's report entitlements.
+        if answer_service is None:
+            ticket_id = db_manager.create_escalation(client_id, query, "Language model is not configured", 0.0)
+            elapsed_ms = int((time.time() - start_time) * 1000)
+            return ChatResponse(
+                answer=f"The answer service is not configured, so I cannot provide a verified response. Analyst ticket #{ticket_id} has been opened.",
+                citations=[], confidence=0.0, conflicts=[], derived_values=[], escalated=True,
+                execution_metrics=ExecutionMetrics(latency_ms=elapsed_ms, tokens_used=0, estimated_cost_usd=0.0)
             )
-        ]
-        
-        answer_text = f"According to {meta.get('report_id')} (Page {meta.get('page', 1)}): {top_chunk['text']}"
+        try:
+            generated = answer_service.answer(sanitized_query, retrieved_chunks)
+        except LLMUnavailable:
+            ticket_id = db_manager.create_escalation(client_id, query, "Grounded answer generation failed", 0.0)
+            elapsed_ms = int((time.time() - start_time) * 1000)
+            return ChatResponse(
+                answer=f"I could not safely verify an answer from the subscribed reports. Analyst ticket #{ticket_id} has been opened.",
+                citations=[], confidence=0.0, conflicts=[], derived_values=[], escalated=True,
+                execution_metrics=ExecutionMetrics(latency_ms=elapsed_ms, tokens_used=0, estimated_cost_usd=0.0)
+            )
+        except Exception:
+            logger.exception("Unexpected grounded-answer service failure")
+            ticket_id = db_manager.create_escalation(client_id, query, "Grounded answer generation failed unexpectedly", 0.0)
+            elapsed_ms = int((time.time() - start_time) * 1000)
+            return ChatResponse(
+                answer=f"I could not safely verify an answer from the subscribed reports. Analyst ticket #{ticket_id} has been opened.",
+                citations=[], confidence=0.0, conflicts=[], derived_values=[], escalated=True,
+                execution_metrics=ExecutionMetrics(latency_ms=elapsed_ms, tokens_used=0, estimated_cost_usd=0.0)
+            )
+
+        citations = []
+        for source in generated["sources"]:
+            meta = source.get("metadata", {})
+            citations.append(Citation(
+                report_id=str(meta.get("report_id", "Unknown")),
+                title=meta.get("title"),
+                page=int(meta.get("page", 1)),
+                quoted_text=str(source.get("text", ""))[:500],
+            ))
+        source_text = " ".join(str(source.get("text", "")) for source in generated["sources"])
+        similarity_confidence = max(0.0, min(1.0, max((float(source.get("score", 0.0)) for source in generated["sources"]), default=0.0)))
+        confidence = min(generated["confidence"], similarity_confidence) if citations else 0.0
+        escalated = confidence < settings.CONFIDENCE_THRESHOLD or not citations
+        answer_text = generated["answer"].strip()
+        answer_numbers = {
+            re.sub(r"[, %]", "", value)
+            for value in re.findall(r"(?<![A-Za-z])\d[\d,]*(?:\.\d+)?\s?%?", answer_text)
+        }
+        source_numbers = {
+            re.sub(r"[, %]", "", value)
+            for value in re.findall(r"(?<![A-Za-z])\d[\d,]*(?:\.\d+)?\s?%?", source_text)
+        }
+        if answer_numbers - source_numbers:
+            confidence = min(confidence, 0.79)
+            escalated = True
+        if not answer_text:
+            answer_text = "The subscribed reports did not provide a verifiable answer to this question."
+            escalated = True
+            confidence = 0.0
+        if escalated:
+            ticket_id = db_manager.create_escalation(client_id, query, "Answer confidence below configured threshold", confidence)
+            answer_text += f" An analyst review ticket #{ticket_id} has been opened."
+        conflicts = []
+        for item in generated["conflicts"]:
+            try:
+                conflicts.append(ConflictItem(**item))
+            except (TypeError, ValueError):
+                continue
         elapsed_ms = int((time.time() - start_time) * 1000)
         return ChatResponse(
             answer=answer_text,
             citations=citations,
-            confidence=0.91,
-            conflicts=[],
+            confidence=confidence,
+            conflicts=conflicts,
             derived_values=[],
-            escalated=False,
-            execution_metrics=ExecutionMetrics(latency_ms=elapsed_ms, tokens_used=110, estimated_cost_usd=0.00018)
+            escalated=escalated,
+            execution_metrics=ExecutionMetrics(
+                latency_ms=elapsed_ms,
+                tokens_used=generated["tokens"],
+                estimated_cost_usd=generated["cost"],
+            ),
         )
 
 agent_engine = AgentEngine()

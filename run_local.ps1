@@ -1,28 +1,68 @@
-# Project Atlas: Local Runner Script
-Write-Host "=================================================" -ForegroundColor Cyan
-Write-Host "   Starting Project Atlas: Report Copilot        " -ForegroundColor Cyan
-Write-Host "=================================================" -ForegroundColor Cyan
+$ErrorActionPreference = 'Stop'
+$projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+Set-Location -LiteralPath $projectRoot
 
-# 1. Ingest reports into vector store
-Write-Host "`n[1/3] Ingesting reports into ChromaDB..." -ForegroundColor Yellow
-python -m backend.app.services.ingest
+$dockerCommand = Get-Command docker -ErrorAction SilentlyContinue
+$dockerExe = if ($dockerCommand) { $dockerCommand.Source } else { 'C:\Program Files\Docker\Docker\resources\bin\docker.exe' }
 
-# 2. Run automated test suite
-Write-Host "`n[2/3] Running automated evaluation harness (25 questions)..." -ForegroundColor Yellow
-python -m backend.tests.eval_harness
-
-# 3. Check for PHP and start frontend if available
-$wingetPhp = "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\PHP.PHP.8.1_Microsoft.Winget.Source_8wekyb3d8bbwe\php.exe"
-$phpExe = if (Get-Command php -ErrorAction SilentlyContinue) { "php" } elseif (Test-Path $wingetPhp) { $wingetPhp } else { $null }
-
-if ($phpExe) {
-    Write-Host "PHP detected ($phpExe). Starting CodeIgniter 3 portal on http://localhost:8080" -ForegroundColor Green
-    Start-Process -FilePath $phpExe -ArgumentList "-S 127.0.0.1:8080 -t frontend" -NoNewWindow
-} else {
-    Write-Host "PHP not detected. Frontend can be run via Docker Compose: 'docker compose up --build'" -ForegroundColor Yellow
+if (-not (Test-Path -LiteralPath $dockerExe)) {
+    [Console]::Error.WriteLine('Docker Desktop CLI was not found. Install or repair Docker Desktop, then try again.')
+    exit 1
 }
 
-# 4. Start FastAPI Backend
-Write-Host "`nStarting FastAPI backend server on http://localhost:8000..." -ForegroundColor Green
-Write-Host "Interactive Swagger Documentation: http://localhost:8000/docs" -ForegroundColor Cyan
-uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload
+if (-not (Test-Path -LiteralPath '.env')) {
+    [Console]::Error.WriteLine('Missing .env. Copy .env.example to .env and configure the required secrets and OPENAI_API_KEY first.')
+    exit 1
+}
+
+$envValues = @{}
+Get-Content -LiteralPath '.env' | ForEach-Object {
+    $line = $_.Trim()
+    if ($line -and -not $line.StartsWith('#') -and $line.Contains('=')) {
+        $parts = $line.Split('=', 2)
+        $envValues[$parts[0].Trim()] = $parts[1].Trim().Trim('"').Trim("'")
+    }
+}
+
+$required = @('API_KEY', 'OPS_API_KEY', 'CI_ENCRYPTION_KEY', 'MYSQL_ROOT_PASSWORD', 'DB_PASSWORD', 'READONLY_DB_PASSWORD')
+$provider = if ($envValues.ContainsKey('LLM_PROVIDER')) { $envValues['LLM_PROVIDER'].ToLowerInvariant() } else { 'openai' }
+if ($provider -eq 'openai') {
+    $required += 'OPENAI_API_KEY'
+} elseif ($provider -eq 'ollama') {
+    if (-not $envValues.ContainsKey('OLLAMA_BASE_URL')) {
+        $envValues['OLLAMA_BASE_URL'] = 'http://host.docker.internal:11434'
+    }
+} else {
+    [Console]::Error.WriteLine('LLM_PROVIDER must be set to openai or ollama.')
+    exit 1
+}
+$missing = @($required | Where-Object { -not $envValues.ContainsKey($_) -or [string]::IsNullOrWhiteSpace($envValues[$_]) -or $envValues[$_] -match 'CHANGE_ME|YOUR_|REPLACE_ME' })
+$priceKeys = if ($provider -eq 'openai') { @('LLM_INPUT_USD_PER_1M_TOKENS', 'LLM_OUTPUT_USD_PER_1M_TOKENS') } else { @() }
+foreach ($name in $priceKeys) {
+    $price = 0.0
+    $validPrice = $envValues.ContainsKey($name) -and [double]::TryParse(
+        $envValues[$name],
+        [Globalization.NumberStyles]::Float,
+        [Globalization.CultureInfo]::InvariantCulture,
+        [ref]$price
+    ) -and -not [double]::IsNaN($price) -and -not [double]::IsInfinity($price) -and $price -ge 0
+    if (-not $validPrice) { $missing += $name }
+}
+if ($missing.Count -gt 0) {
+    [Console]::Error.WriteLine("Configure these values in .env before starting: " + (($missing | Select-Object -Unique) -join ', '))
+    exit 1
+}
+
+Write-Host 'Checking Docker Engine...' -ForegroundColor Cyan
+& $dockerExe info --format '{{.ServerVersion}}' *> $null
+if ($LASTEXITCODE -ne 0) {
+    [Console]::Error.WriteLine('Docker Engine is not running. Open Docker Desktop and wait for Engine running. If it remains starting, restart Windows and check WSL status.')
+    exit 1
+}
+
+Write-Host 'Starting MySQL, the API, and the CodeIgniter portal...' -ForegroundColor Cyan
+& $dockerExe compose up --build
+if ($LASTEXITCODE -ne 0) {
+    [Console]::Error.WriteLine('Project Atlas did not start. Review the Docker Compose output above.')
+    exit $LASTEXITCODE
+}

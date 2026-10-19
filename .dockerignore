@@ -1,0 +1,16 @@
+.git
+**/__pycache__
+**/*.py[cod]
+backend/chroma_data
+backend/atlas_local.db
+frontend
+docs
+*.pdf
+EVALUATION_REPORT.md
+ONE_PAGE_NOTE.md
+.env
+.env.*
+production_reports
+data/*
+!data/seed_sql
+!data/seed_sql/**

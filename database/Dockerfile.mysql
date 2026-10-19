@@ -1,0 +1,7 @@
+FROM mysql:8.4.11
+
+COPY data/seed_sql/01_schema.sql /docker-entrypoint-initdb.d/01_schema.sql
+COPY data/seed_sql/02_seed.sql /opt/atlas/02_seed.sql
+COPY data/seed_sql/02_load_fixtures.sh /docker-entrypoint-initdb.d/02_load_fixtures.sh
+COPY data/seed_sql/03_create_users.sh /docker-entrypoint-initdb.d/03_create_users.sh
+RUN chmod 0755 /docker-entrypoint-initdb.d/02_load_fixtures.sh /docker-entrypoint-initdb.d/03_create_users.sh

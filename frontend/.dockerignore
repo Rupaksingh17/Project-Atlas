@@ -1,0 +1,12 @@
+.git
+.env
+.env.*
+application/logs/*
+!application/logs/index.html
+application/cache/sessions/*
+!application/cache/sessions/.gitkeep
+*.log
+*.tmp
+*.swp
+Thumbs.db
+.DS_Store

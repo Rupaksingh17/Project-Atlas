@@ -1,8 +1,9 @@
 <?php
 defined('BASEPATH') OR exit('No direct script access allowed');
 
-$config['base_url'] = '';
+$config['base_url'] = getenv('ATLAS_PUBLIC_BASE_URL') ?: '/';
 $config['index_page'] = 'index.php';
+$config['enable_query_strings'] = FALSE;
 $config['uri_protocol'] = 'REQUEST_URI';
 $config['url_suffix'] = '';
 $config['language'] = 'english';
@@ -29,11 +30,20 @@ $config['csrf_expire'] = 7200;
 $config['csrf_regenerate'] = TRUE;
 $config['csrf_exclude_uris'] = array();
 
-$config['encryption_key'] = 'REDACTED_DEVELOPMENT_SESSION_KEY';
+$ci_encryption_key = getenv('CI_ENCRYPTION_KEY') ?: '';
+if (strlen($ci_encryption_key) < 32 || strpos($ci_encryption_key, 'CHANGE_ME') !== FALSE) {
+    error_log('Project Atlas portal encryption key is missing or invalid.');
+    http_response_code(503);
+    exit('The portal is not configured.');
+}
+$config['encryption_key'] = $ci_encryption_key;
 $config['sess_driver'] = 'files';
 $config['sess_cookie_name'] = 'atlas_session';
 $config['sess_expiration'] = 7200;
 $config['sess_save_path'] = rtrim(sys_get_temp_dir(), '\\/');
 $config['sess_match_ip'] = FALSE;
 $config['sess_time_to_update'] = 300;
-$config['sess_regenerate_destroy'] = FALSE;
+$config['sess_regenerate_destroy'] = TRUE;
+$config['cookie_secure'] = filter_var(getenv('COOKIE_SECURE') ?: 'false', FILTER_VALIDATE_BOOLEAN);
+$config['cookie_httponly'] = TRUE;
+$config['cookie_samesite'] = 'Lax';

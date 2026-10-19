@@ -44,8 +44,8 @@ class TestAgentEngine(unittest.TestCase):
         # Legitimate library count
         res = agent_engine.process_query("C-01", "Which sector has the most reports in your library?")
         self.assertIn("Utilities", res.answer)
-        self.assertIn("SELECT", res.answer)
-        print("Test 6 passed: Safe SQL aggregate query executed.")
+        self.assertIn("available to your account", res.answer)
+        print("Test 6 passed: Per-client report aggregate respected entitlements.")
 
     def test_07_forecast_horizon_escalation(self):
         # Beyond 2030 horizon

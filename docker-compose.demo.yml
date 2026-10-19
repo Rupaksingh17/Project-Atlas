@@ -1,0 +1,18 @@
+services:
+  mysql:
+    environment:
+      LOAD_ASSIGNMENT_FIXTURES: "true"
+
+  api:
+    environment:
+      DATASET_LABEL: assignment_demo_fictional
+      REPORTS_DIR: /reports
+    volumes:
+      - ./data/reports:/reports:ro
+      - ./backend/tests:/app/backend/tests:ro
+
+  portal:
+    environment:
+      DATASET_LABEL: assignment_demo_fictional
+      ATLAS_DEMO_MODE: "true"
+      COOKIE_SECURE: "false"
